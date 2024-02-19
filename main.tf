@@ -25,7 +25,7 @@ resource "google_compute_network" "new-vpc-network" {
 resource "google_compute_subnetwork" "webapp" {
   name          = "webapp"
   ip_cidr_range = "10.0.0.0/24"
-  region        = var.region
+  region        = var.regio
   network       = google_compute_network.new-vpc-network.self_link
 
 }
