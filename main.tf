@@ -38,7 +38,7 @@ resource "google_compute_subnetwork" "db" {
 }
 
 resource "google_compute_route" "assign_route" {
-  name                  = assign-route"
+  name                  = "assign-route"
   network               = google_compute_network.new-vpc-network.self_link
   dest_range            = "0.0.0.0/0"
   next_hop_gateway      = "default-internet-gateway"
