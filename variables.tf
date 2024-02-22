@@ -1,13 +1,26 @@
-variable "serkey"{
+variable "gcp_svc_key"{
 
 }
 
-variable "projectname" {
+variable "gcp_project" {
 
 
 }
 
-variable "region" {
+variable "gcp_region" {
 
 
+}
+
+variable "subwebapp" {
+
+}
+
+variable "subdb" {
+
+}
+
+variable "routemode" {
+
+    
 }
