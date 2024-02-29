@@ -1,3 +1,9 @@
+resource "google_project_service" "private_services_access" {
+  project = var.gcp_project
+  service = "servicenetworking.googleapis.com"
+  depends_on = [ google_compute_network.vpc1_network ]
+}
+
 resource "google_compute_network" "vpc1_network" {
   project                 = var.gcp_project
   name                    = "vpc1-network"
@@ -8,41 +14,49 @@ resource "google_compute_network" "vpc1_network" {
 }
 
 resource "google_compute_subnetwork" "webapp" {
+  project = var.gcp_project
   name          = "webapp"
   ip_cidr_range = var.subwebapp
   region        = var.gcp_region
   network       = google_compute_network.vpc1_network.self_link
-
-
+  private_ip_google_access = true
+  depends_on    = [google_compute_network.vpc1_network]
 }
 
 resource "google_compute_subnetwork" "db" {
+  project = var.gcp_project
   name          = "db"
   ip_cidr_range = var.subdb
   region        = var.gcp_region
   network       = google_compute_network.vpc1_network.self_link
+  depends_on    = [google_compute_network.vpc1_network]
 }
 
 resource "google_compute_route" "custom_route" {
+  project = var.gcp_project
   name                  = "custom-route"
   network               = google_compute_network.vpc1_network.self_link
   dest_range            = "0.0.0.0/0"
   next_hop_gateway      = "default-internet-gateway"
+  depends_on            = [google_compute_network.vpc1_network]
 }
 
 resource "google_compute_firewall" "allow_http" {
+  project = var.gcp_project
   name    = "allow-http"
   network = google_compute_network.vpc1_network.name
 
   allow {
     protocol = "tcp"
-    ports    = ["8888"] // Change to the port your application listens to
+    ports    = ["8888"]
   }
 
   source_ranges = ["0.0.0.0/0"]
+  depends_on    = [google_compute_network.vpc1_network]
 }
 
 resource "google_compute_firewall" "block_ssh" {
+  project = var.gcp_project
   name    = "block-ssh"
   network = google_compute_network.vpc1_network.name
 
@@ -52,29 +66,130 @@ resource "google_compute_firewall" "block_ssh" {
   }
 
   source_ranges = ["0.0.0.0/0"]
+  depends_on    = [google_compute_network.vpc1_network]
 }
 
+resource "google_compute_firewall" "cloudsql_access" {
+  project = var.gcp_project
+  name    = "allow-cloudsql-access"
+  network = google_compute_network.vpc1_network.name
 
-resource "google_compute_instance" "google-custom-instance" {
+  allow {
+    protocol = "tcp"
+    ports    = ["8888","3306"]
+  }
+
+  source_tags = [google_compute_instance.google_custom_instance.name]
+  target_tags = [google_sql_database_instance.cloudsql_instance.name]
+  depends_on    = [google_compute_network.vpc1_network, google_compute_instance.google_custom_instance, google_sql_database_instance.cloudsql_instance]
+}
+
+resource "google_compute_global_address" "private_service_address" {
+  project               = var.gcp_project
+  name                  = "private-service-address"
+  purpose               = "VPC_PEERING"
+  address_type          = "INTERNAL"
+  network               = google_compute_network.vpc1_network.id
+  prefix_length         = 24
+  depends_on = [google_compute_network.vpc1_network]
+}
+
+resource "google_service_networking_connection" "private_vpc_connection" {
+  network                 = google_compute_network.vpc1_network.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_service_address.name]
+  depends_on              = [google_project_service.private_services_access, 
+                            google_compute_global_address.private_service_address, 
+                            google_compute_network.vpc1_network]
+}
+
+resource "google_sql_database" "cloudsql_database" {
+  project = var.gcp_project
+  name     = "webapp"
+  instance = google_sql_database_instance.cloudsql_instance.name
+  depends_on = [ google_sql_database_instance.cloudsql_instance ]
+}
+
+resource "google_sql_database_instance" "cloudsql_instance" {
+  name             = "cloudsql-instance"
+  project          = var.gcp_project
+  region           = var.gcp_region
+  deletion_protection = false
+  database_version = "MYSQL_8_0"
+  depends_on = [google_project_service.private_services_access, 
+                google_compute_network.vpc1_network,
+                google_service_networking_connection.private_vpc_connection,
+                google_compute_global_address.private_service_address]
+  
+  settings {
+    tier = "db-f1-micro"
+    availability_type = "REGIONAL"
+    disk_type = "pd-ssd"
+    disk_size = 100
+    ip_configuration {
+      ipv4_enabled = false
+      private_network = google_compute_network.vpc1_network.self_link
+    }
+    backup_configuration {
+      binary_log_enabled = true
+      enabled = true
+    }
+  }
+}
+
+resource "random_password" "cloudsql_password" {
+  length  = 16
+  upper   = true
+  lower   = true
+  number  = true
+  override_special = "!&#"
+  depends_on = [ google_sql_database_instance.cloudsql_instance ]
+}
+
+resource "google_sql_user" "cloudsql_user" {
+  project = var.gcp_project
+  name     = "webapp"
+  instance = google_sql_database_instance.cloudsql_instance.name
+  password = random_password.cloudsql_password.result
+  depends_on = [ google_sql_database_instance.cloudsql_instance ]
+}
+
+resource "google_compute_instance" "google_custom_instance" {
+  project = var.gcp_project
   name         = "google-custom-instance"
   machine_type = "n1-standard-1"
-  zone         = "us-central1-a" // Change to your desired zone
+  zone         = var.zone
+  depends_on = [google_sql_database_instance.cloudsql_instance , 
+                google_compute_network.vpc1_network, 
+                google_compute_subnetwork.webapp, 
+                google_compute_subnetwork.db, 
+                google_sql_database_instance.cloudsql_instance,
+                google_sql_database.cloudsql_database,
+                google_sql_user.cloudsql_user]
 
   boot_disk {
     initialize_params {
       image = "custom-image"
-      size  = 100  # Size in GB
+      size  = 100
       type  = "pd-balanced"
-
-       // Use the name of your custom image
     }
   }
 
   network_interface {
     network = google_compute_network.vpc1_network.self_link
     subnetwork = google_compute_subnetwork.webapp.self_link
-    access_config {}
+    access_config {
+      
+    }
   }
 
-  metadata_startup_script = "echo 'Instance created.' >> /var/log/startup_script.log" // Optional startup script
+  metadata = {
+    MYSQL_HOST = google_sql_database_instance.cloudsql_instance.ip_address[0]["ip_address"]
+    MYSQL_USER = google_sql_user.cloudsql_user.name
+    MYSQL_PASSWORD = google_sql_user.cloudsql_user.password
+    MYSQL_DATABASE = google_sql_database.cloudsql_database.name
+    MYSQL_ROOT_PASSWORD = "root"
+    MYSQL_PORT = "3306"
+  }
+  metadata_startup_script = "/home/csye6225/reload_service.sh && touch /home/csye6225/reload_flag"
 }

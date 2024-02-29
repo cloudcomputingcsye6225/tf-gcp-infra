@@ -24,3 +24,7 @@ variable "routemode" {
 
     
 }
+
+variable "zone" {
+    
+}
