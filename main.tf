@@ -60,7 +60,7 @@ resource "google_compute_firewall" "block_ssh" {
   name    = "block-ssh"
   network = google_compute_network.vpc1_network.name
 
-  deny {
+  allow {
     protocol = "tcp"
     ports    = ["22"]
   }
@@ -165,7 +165,10 @@ resource "google_compute_instance" "google_custom_instance" {
                 google_compute_subnetwork.db, 
                 google_sql_database_instance.cloudsql_instance,
                 google_sql_database.cloudsql_database,
-                google_sql_user.cloudsql_user]
+                google_sql_user.cloudsql_user,
+                google_service_account.my_service_account,
+                google_project_iam_binding.my_service_account_metric_writer,
+                google_project_iam_binding.my_service_account_roles]
 
   boot_disk {
     initialize_params {
@@ -183,6 +186,11 @@ resource "google_compute_instance" "google_custom_instance" {
     }
   }
 
+  service_account {
+    email  = google_service_account.my_service_account.email
+    scopes = ["userinfo-email", "compute-ro", "storage-ro", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/logging.write"]
+  }
+
   metadata = {
     MYSQL_HOST = google_sql_database_instance.cloudsql_instance.ip_address[0]["ip_address"]
     MYSQL_USER = google_sql_user.cloudsql_user.name
@@ -192,4 +200,49 @@ resource "google_compute_instance" "google_custom_instance" {
     MYSQL_PORT = "3306"
   }
   metadata_startup_script = "/home/csye6225/reload_service.sh && touch /home/csye6225/reload_flag"
+}
+
+resource "google_dns_record_set" "www" {
+  name    = "generalming.me."
+  type    = "A"
+  ttl     = 60
+  managed_zone = var.dnszone
+
+  rrdatas = [google_compute_instance.google_custom_instance.network_interface.0.access_config.0.nat_ip]
+}
+
+resource "google_dns_record_set" "generalmingme" {
+  name    = "www.generalming.me."
+  type    = "CNAME"
+  ttl     = 60
+  managed_zone = var.dnszone
+
+  rrdatas = ["generalming.me."]
+}
+
+resource "google_service_account" "my_service_account" {
+  account_id   = "iam-service-account"
+  display_name = "iam binding roles"
+}
+
+resource "google_project_iam_binding" "my_service_account_roles" {
+  project = var.gcp_project
+  role    = "roles/logging.admin"
+  depends_on = [ google_service_account.my_service_account ]
+  members = [
+    "serviceAccount:${google_service_account.my_service_account.email}"
+  ]
+}
+
+resource "google_project_iam_binding" "my_service_account_metric_writer" {
+  project = var.gcp_project
+  role    = "roles/monitoring.metricWriter"
+  depends_on = [ google_service_account.my_service_account ]
+  members = [
+    "serviceAccount:${google_service_account.my_service_account.email}"
+  ]
+}
+
+output "instance_ip_addr" {
+  value = google_compute_instance.google_custom_instance.network_interface.0.access_config.0.nat_ip
 }
