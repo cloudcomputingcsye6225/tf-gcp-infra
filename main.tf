@@ -122,10 +122,10 @@ resource "google_sql_database_instance" "cloudsql_instance" {
                 google_compute_global_address.private_service_address]
   
   settings {
-    tier = "db-f1-micro"
-    availability_type = "REGIONAL"
-    disk_type = "pd-ssd"
-    disk_size = 100
+    tier = var.tier
+    availability_type = var.routemode
+    disk_type = var.disk_type
+    disk_size = var.disk_size
     ip_configuration {
       ipv4_enabled = false
       private_network = google_compute_network.vpc1_network.self_link
@@ -168,7 +168,11 @@ resource "google_compute_instance" "google_custom_instance" {
                 google_sql_user.cloudsql_user,
                 google_service_account.my_service_account,
                 google_project_iam_binding.my_service_account_metric_writer,
-                google_project_iam_binding.my_service_account_roles]
+                google_project_iam_binding.my_service_account_roles,
+                google_project_iam_binding.service_account_token_creator_binding,
+                google_project_iam_binding.pubsub_publisher_binding,
+                google_project_iam_binding.pubsub_subscriber_binding,
+                google_pubsub_topic.verify_email_topic]
 
   boot_disk {
     initialize_params {
@@ -188,7 +192,12 @@ resource "google_compute_instance" "google_custom_instance" {
 
   service_account {
     email  = google_service_account.my_service_account.email
-    scopes = ["userinfo-email", "compute-ro", "storage-ro", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/logging.write"]
+    scopes = ["userinfo-email", 
+              "compute-ro", 
+              "storage-ro", 
+              "https://www.googleapis.com/auth/monitoring.write", 
+              "https://www.googleapis.com/auth/logging.write",
+              "https://www.googleapis.com/auth/pubsub"]
   }
 
   metadata = {
@@ -198,6 +207,8 @@ resource "google_compute_instance" "google_custom_instance" {
     MYSQL_DATABASE = google_sql_database.cloudsql_database.name
     MYSQL_ROOT_PASSWORD = "root"
     MYSQL_PORT = "3306"
+    GCP_PROJECT_ID = var.gcp_project
+    GCP_TOPIC = google_pubsub_topic.verify_email_topic.name
   }
   metadata_startup_script = "/home/csye6225/reload_service.sh && touch /home/csye6225/reload_flag"
 }
@@ -243,6 +254,95 @@ resource "google_project_iam_binding" "my_service_account_metric_writer" {
   ]
 }
 
-output "instance_ip_addr" {
-  value = google_compute_instance.google_custom_instance.network_interface.0.access_config.0.nat_ip
+resource "google_project_iam_binding" "service_account_token_creator_binding" {
+  project = var.gcp_project
+  role    = "roles/iam.serviceAccountTokenCreator"
+  depends_on = [ google_service_account.my_service_account ]
+  members = [
+    "serviceAccount:${google_service_account.my_service_account.email}"
+  ]
+}
+
+resource "google_project_iam_binding" "pubsub_publisher_binding" {
+  project = var.gcp_project
+  role    = "roles/pubsub.publisher"
+  depends_on = [ google_service_account.my_service_account ]
+  members = [
+    "serviceAccount:${google_service_account.my_service_account.email}"
+  ]
+}
+
+resource "google_project_iam_binding" "pubsub_subscriber_binding" {
+  project = var.gcp_project
+  role    = "roles/pubsub.subscriber"
+  depends_on = [ google_service_account.my_service_account ]
+  members = [
+    "serviceAccount:${google_service_account.my_service_account.email}"
+  ]
+}
+
+resource "google_project_iam_binding" "cloudsql_client" {
+  project = var.gcp_project
+  role    = "roles/cloudsql.client"
+  members = ["serviceAccount:${google_service_account.my_service_account.email}"]
+  depends_on = [google_service_account.my_service_account]
+}
+
+resource "google_vpc_access_connector" "vpc_connector_cloudsql" {
+  name         = "vpc-connector-cloudsql"
+  network      = google_compute_network.vpc1_network.self_link
+  region       = var.gcp_region
+  ip_cidr_range = var.connector_cidr
+}
+
+resource "google_pubsub_topic" "verify_email_topic" {
+  name = "verify_email"
+  message_storage_policy {
+    allowed_persistence_regions = ["us-west1"]
+  }
+  message_retention_duration = "604800s"
+}
+
+resource "google_storage_bucket" "cloud_function_bucket" {
+  name          = "cloud-function-source-bucket-2024-03-26"
+  location      = "us-west1"
+  force_destroy = true
+  
+  versioning {
+    enabled = true
+  }
+}
+
+resource "google_storage_bucket_object" "cloud_function_object" {
+  name   = "cloud_function_code.zip"
+  bucket = google_storage_bucket.cloud_function_bucket.name
+  source = var.cloud_function_code
+  depends_on = [google_storage_bucket.cloud_function_bucket]
+}
+
+resource "google_cloudfunctions_function" "verify_email_function" {
+  name        = "verify_email"
+  runtime     = "python39" 
+  source_archive_bucket = google_storage_bucket.cloud_function_bucket.name
+  source_archive_object = google_storage_bucket_object.cloud_function_object.name
+  ingress_settings = "ALLOW_ALL"
+  vpc_connector = google_vpc_access_connector.vpc_connector_cloudsql.id
+  event_trigger {
+    event_type = "google.pubsub.topic.publish"
+    resource = google_pubsub_topic.verify_email_topic.name
+  }
+  environment_variables = {
+    DATABASE_NAME = google_sql_database.cloudsql_database.name
+    DATABASE_USER = google_sql_user.cloudsql_user.name
+    DATABASE_PASSWORD = random_password.cloudsql_password.result
+    DATABASE_HOST = google_sql_database_instance.cloudsql_instance.ip_address[0]["ip_address"]
+  }
+  depends_on = [
+    google_pubsub_topic.verify_email_topic,
+    random_password.cloudsql_password,
+    google_sql_database_instance.cloudsql_instance,
+    google_sql_database.cloudsql_database,
+    google_sql_user.cloudsql_user,
+    google_vpc_access_connector.vpc_connector_cloudsql
+  ]
 }
