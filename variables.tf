@@ -29,3 +29,23 @@ variable "zone" {
 variable "dnszone" {
     default = "production"
 }
+
+variable "disk_size" {
+    default = 100
+}
+
+variable "disk_type" {
+    default = "pd-ssd"
+}
+
+variable "tier" {
+    default = "db-f1-micro"
+}
+
+variable "cloud_function_code" {
+    default = "./cloud_function_code.zip"
+}
+
+variable "connector_cidr" {
+    default = "10.6.0.0/28"
+}
