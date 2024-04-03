@@ -49,3 +49,15 @@ variable "cloud_function_code" {
 variable "connector_cidr" {
     default = "10.6.0.0/28"
 }
+
+variable "max_replicas" {
+    default = 6
+}
+
+variable "min_replicas" {
+    default = 3
+}
+
+variable "cpu_utilization" {
+    default = 0.05
+}
