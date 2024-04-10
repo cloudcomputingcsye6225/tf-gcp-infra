@@ -61,3 +61,23 @@ variable "min_replicas" {
 variable "cpu_utilization" {
     default = 0.05
 }
+
+variable "rotation_period" {
+    default = "86760s"
+}
+
+variable "key_ring_id" {
+    default = "projects/production-environment-415721/locations/us-west1/keyRings/final-key-ring"
+}
+
+variable "vm_key_name" {
+    default = "vmkey2"
+}
+
+variable "sql_key_name" {
+    default = "sqlkey2"
+}
+
+variable "storage_key_name" {
+    default = "storagekey2"
+}
