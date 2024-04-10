@@ -4,6 +4,13 @@ resource "google_project_service" "private_services_access" {
   depends_on = [ google_compute_network.vpc1_network ]
 }
 
+resource "google_project_service_identity" "cloudsql_sa" {
+  provider = google-beta
+
+  project = var.gcp_project
+  service = "sqladmin.googleapis.com"
+}
+
 resource "google_compute_network" "vpc1_network" {
   project                 = var.gcp_project
   name                    = "vpc1-network"
@@ -69,20 +76,6 @@ resource "google_compute_firewall" "block_ssh" {
   depends_on    = [google_compute_network.vpc1_network]
 }
 
-/*resource "google_compute_firewall" "cloudsql_access" {
-  project = var.gcp_project
-  name    = "allow-cloudsql-access"
-  network = google_compute_network.vpc1_network.name
-
-  allow {
-    protocol = "tcp"
-    ports    = ["8888","3306"]
-  }
-
-  source_tags = [google_compute_region_instance_group_manager.web_instance_group_manager.name]
-  target_tags = [google_sql_database_instance.cloudsql_instance.name]
-}*/
-
 resource "google_compute_global_address" "private_service_address" {
   project               = var.gcp_project
   name                  = "private-service-address"
@@ -114,11 +107,12 @@ resource "google_sql_database_instance" "cloudsql_instance" {
   project          = var.gcp_project
   region           = var.gcp_region
   deletion_protection = false
+  encryption_key_name = google_kms_crypto_key.sql_crypto_key.id
   database_version = "MYSQL_8_0"
   depends_on = [google_project_service.private_services_access, 
                 google_compute_network.vpc1_network,
                 google_service_networking_connection.private_vpc_connection,
-                google_compute_global_address.private_service_address]
+                google_compute_global_address.private_service_address, google_kms_crypto_key_iam_binding.sql_key_crypto_key ]
   
   settings {
     tier = var.tier
@@ -134,6 +128,7 @@ resource "google_sql_database_instance" "cloudsql_instance" {
       enabled = true
     }
   }
+  
 }
 
 resource "random_password" "cloudsql_password" {
@@ -153,69 +148,12 @@ resource "google_sql_user" "cloudsql_user" {
   depends_on = [ google_sql_database_instance.cloudsql_instance ]
 }
 
-/*resource "google_compute_instance" "google_custom_instance" {
-  project = var.gcp_project
-  name         = "google-custom-instance"
-  machine_type = "n1-standard-1"
-  zone         = var.zone
-  depends_on = [google_sql_database_instance.cloudsql_instance , 
-                google_compute_network.vpc1_network, 
-                google_compute_subnetwork.webapp, 
-                google_compute_subnetwork.db, 
-                google_sql_database_instance.cloudsql_instance,
-                google_sql_database.cloudsql_database,
-                google_sql_user.cloudsql_user,
-                google_service_account.my_service_account,
-                google_project_iam_binding.my_service_account_metric_writer,
-                google_project_iam_binding.my_service_account_roles,
-                google_project_iam_binding.service_account_token_creator_binding,
-                google_project_iam_binding.pubsub_publisher_binding,
-                google_project_iam_binding.pubsub_subscriber_binding,
-                google_pubsub_topic.verify_email_topic]
-
-  boot_disk {
-    initialize_params {
-      image = "custom-image"
-      size  = 100
-      type  = "pd-balanced"
-    }
-  }
-
-  network_interface {
-    network = google_compute_network.vpc1_network.self_link
-    subnetwork = google_compute_subnetwork.webapp.self_link
-    access_config {
-      
-    }
-  }
-
-  service_account {
-    email  = google_service_account.my_service_account.email
-    scopes = ["userinfo-email", 
-              "compute-ro", 
-              "storage-ro", 
-              "https://www.googleapis.com/auth/monitoring.write", 
-              "https://www.googleapis.com/auth/logging.write",
-              "https://www.googleapis.com/auth/pubsub"]
-  }
-
-  metadata = {
-    MYSQL_HOST = google_sql_database_instance.cloudsql_instance.ip_address[0]["ip_address"]
-    MYSQL_USER = google_sql_user.cloudsql_user.name
-    MYSQL_PASSWORD = google_sql_user.cloudsql_user.password
-    MYSQL_DATABASE = google_sql_database.cloudsql_database.name
-    MYSQL_ROOT_PASSWORD = "root"
-    MYSQL_PORT = "3306"
-    GCP_PROJECT_ID = var.gcp_project
-    GCP_TOPIC = google_pubsub_topic.verify_email_topic.name
-  }
-  metadata_startup_script = "/home/csye6225/reload_service.sh && touch /home/csye6225/reload_flag"
-}*/
-
 resource "google_compute_region_instance_template" "web_instance_template" {
   name        = "web-instance-template"
   project     = var.gcp_project
   region      = var.gcp_region
+  
+  depends_on = [ google_kms_crypto_key_iam_binding.vm_key_crypto_key ]
 
   machine_type = "n1-standard-1"
 
@@ -224,8 +162,10 @@ resource "google_compute_region_instance_template" "web_instance_template" {
     auto_delete  = true
     type  = "pd-balanced"
     disk_size_gb = 100
-  }
-  
+    disk_encryption_key {
+      kms_key_self_link = google_kms_crypto_key.vm_crypto_key.id
+    }
+  }  
 
   network_interface {
     network = google_compute_network.vpc1_network.self_link
@@ -264,7 +204,6 @@ resource "google_dns_record_set" "www" {
   ttl     = 60
   managed_zone = var.dnszone
   rrdatas = [google_compute_global_forwarding_rule.web_forwarding_rule.ip_address]
-  #rrdatas = [google_compute_instance.google_custom_instance.network_interface.0.access_config.0.nat_ip]
 }
 
 resource "google_dns_record_set" "generalmingme" {
@@ -352,10 +291,15 @@ resource "google_storage_bucket" "cloud_function_bucket" {
   name          = "cloud-function-source-bucket-2024-03-26"
   location      = "us-west1"
   force_destroy = true
+
+  encryption {
+    default_kms_key_name = google_kms_crypto_key.storage_crypto_key.id
+  }
   
   versioning {
     enabled = true
   }
+  depends_on = [ google_kms_crypto_key_iam_binding.storage_key_crypto_key ]
 }
 
 resource "google_storage_bucket_object" "cloud_function_object" {
@@ -483,4 +427,67 @@ resource "google_compute_region_autoscaler" "web_autoscaler" {
       target = var.cpu_utilization
     }
   }
+}
+/*
+resource "google_kms_key_ring" "final_key_ring" {
+  name     = "final-key-ring"
+  location = var.gcp_region
+}*/
+
+resource "google_kms_crypto_key" "vm_crypto_key" {
+  name       = var.vm_key_name
+  key_ring = var.key_ring_id
+  rotation_period = var.rotation_period
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "google_kms_crypto_key" "sql_crypto_key" {
+  name       = var.sql_key_name
+  key_ring = var.key_ring_id
+  rotation_period = var.rotation_period
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "google_kms_crypto_key" "storage_crypto_key" {
+  name       = var.storage_key_name
+  key_ring   = var.key_ring_id
+  rotation_period = var.rotation_period
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "google_kms_crypto_key_iam_binding" "vm_key_crypto_key" {
+  crypto_key_id = google_kms_crypto_key.vm_crypto_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+  members = [
+    "serviceAccount:${google_service_account.my_service_account.email}",
+    "serviceAccount:service-661981349246@compute-system.iam.gserviceaccount.com"
+  ]
+}
+
+resource "google_kms_crypto_key_iam_binding" "sql_key_crypto_key" {
+  crypto_key_id = google_kms_crypto_key.sql_crypto_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+  members = [
+    "serviceAccount:${google_project_service_identity.cloudsql_sa.email}"
+  ]
+}
+
+resource "google_kms_crypto_key_iam_binding" "storage_key_crypto_key" {
+  crypto_key_id = google_kms_crypto_key.storage_crypto_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+  members = [
+    "serviceAccount:${data.google_storage_project_service_account.gcs_account.email_address}"
+  ]
+}
+
+data "google_storage_project_service_account" "gcs_account" {
 }
